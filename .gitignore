@@ -1,0 +1,31 @@
+# Unity generated
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+
+# Asset meta (kept for source assets; ignore for generated)
+*.csproj
+*.sln
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# OS / IDE
+.DS_Store
+.vs/
+.idea/
+.gradle/
+ExportedObj/
+crashlytics-build.properties
+sysinfo.txt
