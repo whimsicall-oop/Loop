@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Skybound Adventures — Demo</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #0b1026; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none; touch-action: none;
+  }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; max-width: 100%; max-height: 100%; image-rendering: auto;
+    box-shadow: 0 20px 80px rgba(0,0,0,.6); border-radius: 8px; }
+  #hint {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    color: #9fb0e0; font-size: 13px; letter-spacing: .3px; text-align: center;
+    background: rgba(10,16,40,.55); padding: 8px 16px; border-radius: 999px;
+    backdrop-filter: blur(6px); pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="960" height="540"></canvas></div>
+<div id="hint">⬅️➡️ / A D&nbsp; gerak &nbsp;·&nbsp; SPASI lompat (tahan = tinggi, tekan lagi = double)&nbsp;·&nbsp; SHIFT dash &nbsp;·&nbsp; R ulang</div>
+<script>
+"use strict";
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+
+/* ============================================================
+   Skybound Adventures — playable browser demo
+   Mem-port "game feel" dari kode Unity:
+   coyote time, jump buffer, variable jump, double jump, dash,
+   akselerasi, gravitasi asimetris (jatuh lebih cepat dari naik).
+   ============================================================ */
+
+// ---- Tuning (mirror dari MovementConfig) ----
+const CFG = {
+  moveSpeed: 3.4,
+  groundAccel: 0.7, groundDecel: 0.85, airAccel: 0.45, turnBoost: 1.7,
+  gravity: 0.62, fallMult: 1.55, lowJumpMult: 2.4, maxFall: 13,
+  jumpVel: 12.2, maxJumps: 2,
+  coyoteTime: 9, jumpBuffer: 9,           // dalam frame (~150ms @60fps)
+  dashSpeed: 11, dashTime: 11, dashCD: 32, airDashes: 1,
+};
+
+const keys = {};
+const pressed = {};
+addEventListener("keydown", e => {
+  if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Space"].includes(e.code)) e.preventDefault();
+  if (!keys[e.code]) pressed[e.code] = true;
+  keys[e.code] = true;
+});
+addEventListener("keyup", e => { keys[e.code] = false; });
+
+const L = k => keys["ArrowLeft"]||keys["KeyA"];
+const R = k => keys["ArrowRight"]||keys["KeyD"];
+const jumpDown = () => pressed["Space"]||pressed["ArrowUp"]||pressed["KeyW"];
+const jumpHeld = () => keys["Space"]||keys["ArrowUp"]||keys["KeyW"];
+const dashDown = () => pressed["ShiftLeft"]||pressed["ShiftRight"]||pressed["KeyK"];
+
+// ---- Level ----
+const platforms = [
+  {x:0,y:480,w:520,h:80},
+  {x:600,y:440,w:160,h:120},
+  {x:840,y:390,w:140,h:170},
+  {x:1060,y:470,w:240,h:90},
+  {x:1380,y:410,w:120,h:30},
+  {x:1560,y:350,w:120,h:30},
+  {x:1740,y:300,w:160,h:30},
+  {x:1980,y:430,w:360,h:130},
+  {x:2420,y:380,w:120,h:30},
+  {x:2600,y:330,w:120,h:30},
+  {x:2780,y:470,w:520,h:90},
+];
+const LEVEL_END = 3300;
+
+let coins, enemies, particles, player, cam, state, msg, coinCount, hearts;
+
+function reset() {
+  player = {
+    x: 80, y: 380, w: 26, h: 34, vx: 0, vy: 0,
+    facing: 1, grounded: false, jumps: 0,
+    coyote: 0, buffer: 0, dashCD: 0, dashT: 0, airDash: 0,
+    sx: 1, sy: 1, // squash & stretch
+    iframes: 0,
+  };
+  cam = { x: 0, y: 0 };
+  coins = [
+    [320,420],[420,420],[660,390],[890,340],[1130,420],
+    [1400,360],[1580,300],[1760,250],[2080,380],[2460,330],
+    [2640,280],[2860,420],[2980,420],[1190,420],
+  ].map(([x,y]) => ({x,y,got:false,t:Math.random()*6}));
+  enemies = [
+    {x:1100,y:440,w:30,h:24,minX:1070,maxX:1280,dir:1,alive:true,t:0},
+    {x:2050,y:400,w:30,h:24,minX:1990,maxX:2300,dir:1,alive:true,t:0},
+    {x:2820,y:440,w:30,h:24,minX:2790,maxX:3260,dir:1,alive:true,t:0},
+  ];
+  particles = [];
+  coinCount = 0; hearts = 5;
+  state = "play"; msg = "";
+}
+reset();
+
+function rectsOverlap(a, b) {
+  return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+}
+
+function spawnDust(x, y, n, color, spread) {
+  for (let i=0;i<n;i++) particles.push({
+    x, y, vx:(Math.random()-.5)*spread, vy:-Math.random()*2-0.4,
+    life: 24+Math.random()*16, max:40, r: 2+Math.random()*3, color
+  });
+}
+
+// ---- Physics & feel (port dari PlayerMotor) ----
+function updatePlayer() {
+  const p = player;
+  if (p.dashCD>0) p.dashCD--;
+  if (p.coyote>0) p.coyote--;
+  if (p.buffer>0) p.buffer--;
+  if (p.iframes>0) p.iframes--;
+
+  if (jumpDown()) p.buffer = CFG.jumpBuffer;
+
+  // ---- DASHING ----
+  if (p.dashT>0) {
+    p.dashT--;
+    p.vy = 0;
+    if (p.dashT===0) p.vx *= 0.45;
+    moveAndCollide(p);
+    decaySquash(p);
+    return;
+  }
+
+  // horizontal
+  const dir = (R()?1:0) - (L()?1:0);
+  const target = dir * CFG.moveSpeed;
+  let accel = Math.abs(target)>0.01 ? (p.grounded?CFG.groundAccel:CFG.airAccel)
+                                    : (p.grounded?CFG.groundDecel:CFG.airAccel);
+  if (target*p.vx < 0) accel *= CFG.turnBoost;
+  p.vx += (target - p.vx) * Math.min(1, accel);
+  if (dir!==0) p.facing = dir;
+
+  // gravity (asimetris)
+  let g = CFG.gravity;
+  if (p.vy > 0) g *= CFG.fallMult;
+  else if (p.vy < 0 && !jumpHeld()) g *= CFG.lowJumpMult; // variable jump
+  p.vy += g;
+  if (p.vy > CFG.maxFall) p.vy = CFG.maxFall;
+
+  // jump (coyote + buffer + double)
+  if (p.buffer>0) {
+    if (p.coyote>0 || p.grounded) {
+      doJump(p, CFG.jumpVel); p.jumps = CFG.maxJumps-1; p.coyote=0;
+    } else if (p.jumps>0) {
+      doJump(p, CFG.jumpVel*0.92); p.jumps--;
+      spawnDust(p.x+p.w/2, p.y+p.h, 8, "rgba(160,200,255,.9)", 3);
+    }
+  }
+
+  // dash
+  if (dashDown() && p.dashCD===0) {
+    if (p.grounded || p.airDash>0) {
+      if (!p.grounded) p.airDash--;
+      p.dashT = CFG.dashTime; p.dashCD = CFG.dashCD;
+      const d = dir!==0 ? dir : p.facing; p.facing=d;
+      p.vx = d*CFG.dashSpeed; p.vy = 0;
+      p.sx=1.4; p.sy=0.7;
+      spawnDust(p.x+p.w/2, p.y+p.h/2, 12, "rgba(120,230,255,.8)", 4);
+    }
+  }
+
+  moveAndCollide(p);
+  decaySquash(p);
+}
+
+function doJump(p, v){ p.vy = -v; p.buffer=0; p.sx=0.7; p.sy=1.4;
+  spawnDust(p.x+p.w/2, p.y+p.h, 6, "rgba(220,235,255,.8)", 2); }
+
+function decaySquash(p){ p.sx += (1-p.sx)*0.2; p.sy += (1-p.sy)*0.2; }
+
+function moveAndCollide(p) {
+  const wasGrounded = p.grounded;
+  // X
+  p.x += p.vx;
+  for (const pf of platforms) {
+    if (rectsOverlap(p, pf)) {
+      if (p.vx>0) p.x = pf.x - p.w; else if (p.vx<0) p.x = pf.x+pf.w;
+      p.vx = 0;
+    }
+  }
+  if (p.x < 0) { p.x=0; p.vx=0; }
+
+  // Y
+  p.grounded = false;
+  p.y += p.vy;
+  for (const pf of platforms) {
+    if (rectsOverlap(p, pf)) {
+      if (p.vy>0) {
+        const impact = p.vy;
+        p.y = pf.y - p.h; p.vy=0; p.grounded=true;
+        if (!wasGrounded) {
+          p.sx=1.35; p.sy=0.7;
+          spawnDust(p.x+p.w/2, p.y+p.h, Math.min(14, 3+impact|0), "rgba(210,220,245,.85)", impact*0.4);
+        }
+      } else if (p.vy<0) { p.y = pf.y+pf.h; p.vy=0; }
+    }
+  }
+  if (p.grounded) { p.coyote = CFG.coyoteTime; p.jumps = CFG.maxJumps; p.airDash = CFG.airDashes; }
+
+  // jatuh ke jurang
+  if (p.y > H+200) damage(true);
+
+  // goal
+  if (p.x > LEVEL_END) { state="win"; msg="KAMU MENANG! 🎉"; }
+}
+
+function damage(fall) {
+  if (player.iframes>0 && !fall) return;
+  hearts -= fall ? 1 : 1;
+  player.iframes = 70;
+  spawnDust(player.x+player.w/2, player.y+player.h/2, 14, "rgba(255,120,120,.9)", 5);
+  if (fall) { player.x = Math.max(80, player.x-120); player.y = 200; player.vy=0; player.vx=0; }
+  else { player.vy = -7; player.vx = -player.facing*6; }
+  if (hearts<=0) { state="lose"; msg="Yah, kalah... tekan R buat coba lagi"; }
+}
+
+function updateEnemies() {
+  for (const e of enemies) {
+    if (!e.alive) continue;
+    e.t += 0.1;
+    e.x += e.dir*1.1;
+    if (e.x < e.minX) { e.x=e.minX; e.dir=1; }
+    if (e.x > e.maxX) { e.x=e.maxX; e.dir=-1; }
+    if (player.iframes<=0 && rectsOverlap(player, e)) {
+      // stomp dari atas?
+      if (player.vy>1 && player.y+player.h < e.y+e.h*0.7) {
+        e.alive=false; player.vy = -9; player.jumps=CFG.maxJumps;
+        spawnDust(e.x+e.w/2, e.y, 16, "rgba(120,255,170,.9)", 5);
+        coinCount += 2;
+      } else damage(false);
+    }
+  }
+}
+
+function updateCoins() {
+  for (const c of coins) {
+    if (c.got) continue;
+    c.t += 0.12;
+    if (Math.abs((player.x+player.w/2)-c.x) < 24 && Math.abs((player.y+player.h/2)-c.y) < 26) {
+      c.got=true; coinCount++;
+      spawnDust(c.x, c.y, 10, "rgba(255,225,120,.95)", 3);
+    }
+  }
+}
+
+function updateParticles() {
+  for (let i=particles.length-1;i>=0;i--){
+    const q=particles[i]; q.x+=q.vx; q.y+=q.vy; q.vy+=0.12; q.life--;
+    if (q.life<=0) particles.splice(i,1);
+  }
+}
+
+function updateCamera() {
+  const tx = player.x - W*0.4;
+  const ty = player.y - H*0.55;
+  cam.x += (tx-cam.x)*0.12; cam.y += (ty-cam.y)*0.1;
+  cam.x = Math.max(0, Math.min(cam.x, LEVEL_END - W*0.2));
+  cam.y = Math.min(cam.y, 120);
+}
+
+// ---- Render ----
+function drawSky() {
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,"#2a3a7a"); g.addColorStop(0.5,"#5a6fb5"); g.addColorStop(1,"#bfa6d8");
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  // matahari
+  const sx = 760 - cam.x*0.05, sy = 110;
+  const sg = ctx.createRadialGradient(sx,sy,10,sx,sy,140);
+  sg.addColorStop(0,"rgba(255,240,200,.95)"); sg.addColorStop(1,"rgba(255,240,200,0)");
+  ctx.fillStyle=sg; ctx.fillRect(sx-150,sy-150,300,300);
+  // parallax bukit
+  drawHills(cam.x*0.15, 380, "#6a78b8", 0.9);
+  drawHills(cam.x*0.3, 430, "#586aa8", 1.1);
+  // awan
+  ctx.fillStyle="rgba(255,255,255,.5)";
+  for (let i=0;i<6;i++){ const cx=((i*420 - cam.x*0.1)%1300+1300)%1300-150; cloud(cx, 80+(i%3)*40); }
+}
+function drawHills(off, base, color, amp){
+  ctx.fillStyle=color; ctx.beginPath(); ctx.moveTo(-50,H);
+  for(let x=-50;x<=W+50;x+=20){ const wx=x+off; ctx.lineTo(x, base + Math.sin(wx*0.004)*40*amp + Math.cos(wx*0.011)*18); }
+  ctx.lineTo(W+50,H); ctx.closePath(); ctx.fill();
+}
+function cloud(x,y){ ctx.beginPath(); ctx.arc(x,y,26,0,7); ctx.arc(x+28,y+6,20,0,7); ctx.arc(x-26,y+8,18,0,7); ctx.fill(); }
+
+function drawPlatform(pf){
+  const x=pf.x-cam.x, y=pf.y-cam.y;
+  const g=ctx.createLinearGradient(0,y,0,y+pf.h);
+  g.addColorStop(0,"#7ec86a"); g.addColorStop(0.18,"#5aa84e"); g.addColorStop(0.25,"#6b4a32"); g.addColorStop(1,"#3e2c1e");
+  ctx.fillStyle=g; roundRect(x,y,pf.w,pf.h,8); ctx.fill();
+  // rumput highlight
+  ctx.fillStyle="rgba(160,230,140,.6)"; ctx.fillRect(x+4,y+3,pf.w-8,4);
+}
+
+function drawCoin(c){
+  if (c.got) return;
+  const x=c.x-cam.x, y=c.y-cam.y + Math.sin(c.t)*4;
+  const sx=Math.cos(c.t*1.5);
+  ctx.save(); ctx.translate(x,y); ctx.scale(Math.abs(sx)*0.7+0.3,1);
+  const g=ctx.createRadialGradient(0,0,2,0,0,12);
+  g.addColorStop(0,"#fff3b0"); g.addColorStop(.6,"#ffd54a"); g.addColorStop(1,"#e0a020");
+  ctx.fillStyle=g; ctx.beginPath(); ctx.arc(0,0,11,0,7); ctx.fill();
+  ctx.strokeStyle="rgba(255,255,255,.7)"; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(0,0,7,0.5,2.2); ctx.stroke();
+  ctx.restore();
+}
+
+function drawEnemy(e){
+  if (!e.alive) return;
+  const x=e.x-cam.x, y=e.y-cam.y, bob=Math.sin(e.t)*3;
+  const g=ctx.createRadialGradient(x+e.w/2,y+e.h/2,3,x+e.w/2,y+e.h/2,22);
+  g.addColorStop(0,"#a6f7c2"); g.addColorStop(1,"#39b06a");
+  ctx.fillStyle=g; roundRect(x,y+bob,e.w,e.h-bob,12); ctx.fill();
+  // mata
+  ctx.fillStyle="#13351f"; ctx.beginPath();
+  ctx.arc(x+e.w*0.33,y+e.h*0.45+bob,2.6,0,7); ctx.arc(x+e.w*0.67,y+e.h*0.45+bob,2.6,0,7); ctx.fill();
+}
+
+function drawPlayer(){
+  const p=player;
+  const x=p.x+p.w/2-cam.x, y=p.y+p.h-cam.y;
+  if (p.iframes>0 && Math.floor(p.iframes/4)%2===0) return; // kedip pas kebal
+  // bayangan
+  ctx.fillStyle="rgba(0,0,0,.18)"; ctx.beginPath(); ctx.ellipse(x, p.grounded?y+2:y+8, 14,5,0,0,7); ctx.fill();
+  ctx.save(); ctx.translate(x,y); ctx.scale(p.facing*p.sx, p.sy);
+  // badan (glow biru langit)
+  const bg=ctx.createLinearGradient(0,-p.h,0,0);
+  bg.addColorStop(0,"#9fe8ff"); bg.addColorStop(1,"#3aa0e8");
+  ctx.fillStyle=bg; roundRect(-p.w/2,-p.h,p.w,p.h,10); ctx.fill();
+  // outline glow
+  ctx.strokeStyle="rgba(180,240,255,.9)"; ctx.lineWidth=2; roundRect(-p.w/2,-p.h,p.w,p.h,10); ctx.stroke();
+  // jubah/sayap kecil
+  ctx.fillStyle="rgba(255,255,255,.85)"; ctx.beginPath();
+  ctx.ellipse(-2,-p.h*0.55,5,8,-0.3,0,7); ctx.fill();
+  // mata
+  ctx.fillStyle="#10283f"; ctx.beginPath();
+  ctx.arc(p.w*0.12,-p.h*0.62,2.4,0,7); ctx.arc(p.w*0.30,-p.h*0.62,2.4,0,7); ctx.fill();
+  ctx.restore();
+}
+
+function drawParticles(){
+  for(const q of particles){ ctx.globalAlpha=Math.max(0,q.life/q.max);
+    ctx.fillStyle=q.color; ctx.beginPath(); ctx.arc(q.x-cam.x,q.y-cam.y,q.r,0,7); ctx.fill(); }
+  ctx.globalAlpha=1;
+}
+
+function drawHUD(){
+  // hearts
+  for(let i=0;i<5;i++){ ctx.fillStyle = i<hearts ? "#ff5a72" : "rgba(255,255,255,.22)";
+    heart(28+i*30, 30, 9); }
+  // coins
+  ctx.fillStyle="#ffd54a"; ctx.beginPath(); ctx.arc(W-120,30,10,0,7); ctx.fill();
+  ctx.fillStyle="#fff"; ctx.font="bold 22px sans-serif"; ctx.textBaseline="middle";
+  ctx.fillText("× "+coinCount, W-100, 32);
+  // progress
+  ctx.fillStyle="rgba(255,255,255,.25)"; roundRect(W/2-120,18,240,8,4); ctx.fill();
+  ctx.fillStyle="#9fe8ff"; roundRect(W/2-120,18,240*Math.min(1,player.x/LEVEL_END),8,4); ctx.fill();
+}
+function heart(x,y,s){ ctx.beginPath();
+  ctx.moveTo(x,y+s*0.35); ctx.bezierCurveTo(x,y-s*0.4,x-s,y-s*0.4,x-s,y+s*0.2);
+  ctx.bezierCurveTo(x-s,y+s*0.7,x,y+s,x,y+s*1.1);
+  ctx.bezierCurveTo(x,y+s,x+s,y+s*0.7,x+s,y+s*0.2);
+  ctx.bezierCurveTo(x+s,y-s*0.4,x,y-s*0.4,x,y+s*0.35); ctx.fill(); }
+
+function drawBanner(){
+  ctx.fillStyle="rgba(8,12,30,.65)"; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle="#fff"; ctx.textAlign="center"; ctx.font="bold 44px sans-serif";
+  ctx.fillText(msg, W/2, H/2-10);
+  ctx.font="18px sans-serif"; ctx.fillStyle="#9fb0e0";
+  ctx.fillText("Tekan R untuk main lagi", W/2, H/2+34);
+  ctx.textAlign="left";
+}
+
+function roundRect(x,y,w,h,r){ ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+// ---- Loop (fixed timestep) ----
+let acc=0, last=performance.now();
+function frame(now){
+  let dt=(now-last)/1000; last=now; if(dt>0.05)dt=0.05; acc+=dt;
+  while(acc>=1/60){
+    if(state==="play"){ updatePlayer(); updateEnemies(); updateCoins(); updateCamera(); }
+    updateParticles();
+    if(pressed["KeyR"]) reset();
+    for(const k in pressed) pressed[k]=false;
+    acc-=1/60;
+  }
+  // draw
+  drawSky();
+  for(const pf of platforms) drawPlatform(pf);
+  // tiang finish
+  const fx=LEVEL_END-cam.x; ctx.fillStyle="#ffffff"; ctx.fillRect(fx,200,6,260);
+  ctx.fillStyle="#ff6b9d"; ctx.beginPath(); ctx.moveTo(fx+6,206); ctx.lineTo(fx+50,222); ctx.lineTo(fx+6,238); ctx.fill();
+  for(const c of coins) drawCoin(c);
+  for(const e of enemies) drawEnemy(e);
+  drawParticles();
+  drawPlayer();
+  drawHUD();
+  if(state!=="play") drawBanner();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
