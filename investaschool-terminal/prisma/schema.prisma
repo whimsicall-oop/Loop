@@ -1,0 +1,232 @@
+// Investaschool Terminal — Prisma schema
+// PostgreSQL. Run: `npm run db:migrate` then `npm run db:seed`.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Users (synced from Clerk via webhook)
+// ─────────────────────────────────────────────────────────────
+model User {
+  id        String   @id @default(cuid())
+  clerkId   String   @unique
+  email     String   @unique
+  firstName String?
+  lastName  String?
+  imageUrl  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  watchlists      Watchlist[]
+  portfolios      Portfolio[]
+  valuations      Valuation[]
+  researchReports ResearchReport[]
+  researchHistory ResearchHistory[]
+
+  @@index([clerkId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Companies + Financials (seeded; provider-abstraction ready)
+// ─────────────────────────────────────────────────────────────
+model Company {
+  id          String  @id @default(cuid())
+  ticker      String  @unique
+  name        String
+  exchange    String  @default("IDX")
+  currency    String  @default("IDR")
+  sector      String
+  industry    String
+  description String  @db.Text
+  businessModel String? @db.Text
+  website     String?
+  logoUrl     String?
+
+  // Latest snapshot metrics
+  price         Float
+  previousClose Float
+  marketCap     Float
+  enterpriseValue Float
+  sharesOutstanding Float
+  dividendYield Float
+  peRatio       Float
+  pbvRatio      Float
+  evEbitda      Float
+  roe           Float
+  roa           Float
+  beta          Float   @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  financials      Financial[]
+  watchlistItems  WatchlistItem[]
+  holdings        PortfolioHolding[]
+  valuations      Valuation[]
+  researchReports ResearchReport[]
+  researchHistory ResearchHistory[]
+
+  @@index([sector])
+  @@index([name])
+}
+
+model Financial {
+  id         String  @id @default(cuid())
+  companyId  String
+  company    Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  fiscalYear Int
+  revenue        Float
+  netIncome      Float
+  grossProfit    Float
+  operatingIncome Float
+  ebitda         Float
+  freeCashFlow   Float
+  operatingCashFlow Float
+  totalAssets    Float
+  totalEquity    Float
+  totalDebt      Float
+  cash           Float
+  grossMargin    Float
+  operatingMargin Float
+  netMargin      Float
+  eps            Float
+
+  createdAt DateTime @default(now())
+
+  @@unique([companyId, fiscalYear])
+  @@index([companyId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Watchlists
+// ─────────────────────────────────────────────────────────────
+model Watchlist {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String   @default("My Watchlist")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items WatchlistItem[]
+
+  @@index([userId])
+}
+
+model WatchlistItem {
+  id          String    @id @default(cuid())
+  watchlistId String
+  watchlist   Watchlist @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
+  companyId   String
+  company     Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  note        String?
+  createdAt   DateTime  @default(now())
+
+  @@unique([watchlistId, companyId])
+  @@index([watchlistId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Portfolios
+// ─────────────────────────────────────────────────────────────
+model Portfolio {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String   @default("My Portfolio")
+  cash      Float    @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  holdings PortfolioHolding[]
+
+  @@index([userId])
+}
+
+model PortfolioHolding {
+  id          String    @id @default(cuid())
+  portfolioId String
+  portfolio   Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  companyId   String
+  company     Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  shares      Float
+  avgCost     Float
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([portfolioId, companyId])
+  @@index([portfolioId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Valuations (DCF)
+// ─────────────────────────────────────────────────────────────
+model Valuation {
+  id        String  @id @default(cuid())
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Inputs
+  revenueGrowth      Float
+  operatingMargin    Float
+  taxRate            Float
+  wacc               Float
+  terminalGrowth     Float
+  projectionYears    Int   @default(5)
+
+  // Outputs
+  intrinsicValue   Float
+  fairValuePerShare Float
+  currentPrice     Float
+  marginOfSafety   Float
+  sensitivity      Json   // 2D grid: WACC x terminal growth
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([companyId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// AI Research Reports + History
+// ─────────────────────────────────────────────────────────────
+model ResearchReport {
+  id        String  @id @default(cuid())
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  title       String
+  rating      String   // BUY / HOLD / SELL
+  targetPrice Float?
+  sections    Json     // structured report sections
+  model       String   // model used or "template-fallback"
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([companyId])
+}
+
+model ResearchHistory {
+  id        String  @id @default(cuid())
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  action    String   // e.g. "generate_report", "generate_thesis"
+  model     String
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
