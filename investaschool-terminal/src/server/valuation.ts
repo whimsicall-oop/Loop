@@ -48,3 +48,37 @@ export async function saveValuation(input: SaveValuationInput): Promise<string> 
   revalidatePath("/valuation");
   return v.id;
 }
+
+export interface ValuationSummaryRow {
+  id: string;
+  ticker: string;
+  name: string;
+  currency: string;
+  fairValuePerShare: number;
+  currentPrice: number;
+  marginOfSafety: number;
+  createdAt: Date;
+}
+
+/** Most recent saved valuations for the dashboard summary widget. */
+export async function getRecentValuations(
+  limit = 5,
+): Promise<ValuationSummaryRow[]> {
+  const user = await requireDbUser();
+  const rows = await db.valuation.findMany({
+    where: { userId: user.id },
+    include: { company: true },
+    orderBy: { createdAt: "desc" },
+    take: limit,
+  });
+  return rows.map((v) => ({
+    id: v.id,
+    ticker: v.company.ticker,
+    name: v.company.name,
+    currency: v.company.currency,
+    fairValuePerShare: v.fairValuePerShare,
+    currentPrice: v.currentPrice,
+    marginOfSafety: v.marginOfSafety,
+    createdAt: v.createdAt,
+  }));
+}
