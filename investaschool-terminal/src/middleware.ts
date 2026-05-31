@@ -11,6 +11,8 @@ const isPublicRoute = createRouteMatcher([
 ]);
 
 export default clerkMiddleware(async (auth, req) => {
+  // Demo mode (local previews) skips auth entirely.
+  if (process.env.DEMO_MODE === "true") return NextResponse.next();
   if (isPublicRoute(req)) return NextResponse.next();
   await auth.protect();
   return NextResponse.next();

@@ -3,11 +3,25 @@ import { db } from "@/lib/db";
 import type { User } from "@prisma/client";
 
 /**
+ * Demo mode (DEMO_MODE=true) bypasses Clerk and uses the seeded demo user.
+ * Intended only for local previews/screenshots — never enable in production.
+ */
+export function demoMode(): boolean {
+  return process.env.DEMO_MODE === "true";
+}
+
+async function demoUser(): Promise<User | null> {
+  return db.user.findUnique({ where: { clerkId: "demo_user_seed" } });
+}
+
+/**
  * Returns the Postgres User row for the signed-in Clerk user, creating it on
  * first access. This "lazy sync" means the app works even before the Clerk
  * webhook is configured; the webhook keeps records fresh in production.
  */
 export async function currentDbUser(): Promise<User | null> {
+  if (demoMode()) return demoUser();
+
   const { userId } = await auth();
   if (!userId) return null;
 
